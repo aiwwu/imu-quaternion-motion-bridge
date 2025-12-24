@@ -1,7 +1,8 @@
 # Motion tracking
 
 
-![ảnh(3)](https://github.com/user-attachments/assets/a7d3d236-69ef-412a-8b90-cd1d1636b262)
+<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/b8122056-ed9f-43b7-a368-b15b19d68208" />
+
 
 
 ## Device Requirements
