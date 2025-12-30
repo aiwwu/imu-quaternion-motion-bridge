@@ -1,0 +1,132 @@
+import bpy
+import socket
+import threading
+import time
+from mathutils import Quaternion
+
+
+UDP_IP = "0.0.0.0" 
+UDP_PORT = 8080   
+ARMATURE_NAME = "metarig"
+
+BONE_MAP = {
+    0: "thigh.L",
+    1: "shin.L"
+}
+
+
+shared_data = {
+    "raw": {},      
+    "offset": {},   
+    "running": False
+}
+
+
+def udp_worker():
+    print(f"--- [NET] Đang mở Server UDP tại cổng {UDP_PORT}... ---")
+    
+ 
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((UDP_IP, UDP_PORT))
+        sock.settimeout(0.5) 
+        print("--- [NET] Đã sẵn sàng nhận dữ liệu! ---")
+    except Exception as e:
+        print(f"!!! [NET] Lỗi tạo socket: {e}")
+        return
+
+    while shared_data["running"]:
+        try:
+           
+            data, addr = sock.recvfrom(1024)
+            line = data.decode('utf-8').strip()
+            
+           
+            parts = line.split(',')
+            if len(parts) == 5:
+                try:
+                    idx = int(parts[0])
+                    w = float(parts[1])
+                    x = float(parts[2])
+                    y = float(parts[3])
+                    z = float(parts[4])
+                    
+                   
+                    shared_data["raw"][idx] = Quaternion((w, x, y, z))
+                except ValueError:
+                    pass
+                    
+        except socket.timeout:
+            continue 
+        except Exception as e:
+            print(f"Lỗi mạng: {e}")
+            
+    sock.close()
+    print("--- [NET] Đã đóng Server. ---")
+
+
+class MocapUDPOperator(bpy.types.Operator):
+    bl_idname = "wm.mocap_udp"
+    bl_label = "Mocap WiFi UDP"
+    _timer = None
+
+    def modal(self, context, event):
+        if event.type == 'ESC':
+            return self.cancel(context)
+
+        # CALIBRATION
+        if event.type == 'F9' and event.value == 'PRESS':
+            print(">>> CALIBRATING... (WiFi Mode)")
+            for idx, q_curr in shared_data["raw"].items():
+                shared_data["offset"][idx] = q_curr.conjugated()
+
+        if event.type == 'TIMER':
+            obj = bpy.data.objects.get(ARMATURE_NAME)
+            if obj:
+                for idx, bone_name in BONE_MAP.items():
+                    if idx in shared_data["raw"]:
+                        bone = obj.pose.bones.get(bone_name)
+                        if bone:
+                            q_raw = shared_data["raw"][idx]
+                            offset = shared_data["offset"].get(idx, Quaternion((1,0,0,0)))
+                            
+                            # Tính toán
+                            q_calibrated = offset @ q_raw
+                            
+                            # Mapping trục (Check kỹ phần này nếu thấy sai hướng)
+                            q_final = Quaternion((q_calibrated.w, q_calibrated.x, q_calibrated.z, -q_calibrated.y))
+                            
+                            bone.rotation_quaternion = q_final
+
+            context.area.tag_redraw()
+
+        return {'PASS_THROUGH'}
+
+    def execute(self, context):
+        if shared_data["running"]: return {'FINISHED'}
+        
+        shared_data["running"] = True
+        
+        # Chạy luồng UDP
+        threading.Thread(target=udp_worker, daemon=True).start()
+        
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.02, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def cancel(self, context):
+        shared_data["running"] = False
+        context.window_manager.event_timer_remove(self._timer)
+        print("=== STOP MOCAP ===")
+        return {'CANCELLED'}
+
+def register():
+    bpy.utils.register_class(MocapUDPOperator)
+
+def unregister():
+    bpy.utils.unregister_class(MocapUDPOperator)
+
+if __name__ == "__main__":
+    register()
+    bpy.ops.wm.mocap_udp()

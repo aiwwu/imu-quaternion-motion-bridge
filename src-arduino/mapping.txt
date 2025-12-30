@@ -1,0 +1,172 @@
+import bpy
+import socket
+import threading
+from mathutils import Quaternion
+
+
+UDP_IP = "0.0.0.0" 
+UDP_PORT = 8080   
+ARMATURE_NAME = "metarig"
+
+# --- CẤU HÌNH MAPPING  ---
+
+# - bone: 
+# - order: Thứ tự trục dữ liệu gốc [w, x, y, z].
+#     -> Blender mặc định là [0, 1, 2, 3] (tức là w,x,y,z).
+#     -> Nếu muốn tráo Y và Z, đổi thành [0, 1, 3, 2].
+# - signs: Đảo chiều trục (1 là giữ nguyên, -1 là đảo ngược).
+#     -> Ví dụ trục Z bị ngược, đổi số cuối cùng thành -1.
+
+SENSOR_CONFIG = {
+    0: { 
+        "bone": "thigh.L",      # ID 0
+        "order": [0, 1, 3, 2],  # Thử nghiệm: Tráo Y và Z 
+        "signs": [1, 1, 1, -1]  # Thử nghiệm: Đảo dấu Z
+    },
+    1: { 
+        "bone": "shin.L",       # ID 1
+        "order": [0, 1, 3, 2],
+        "signs": [1, 1, 1, -1]
+    }
+}
+
+
+shared_data = {
+    "raw": {},      
+    "offset": {},   
+    "running": False
+}
+
+
+def udp_worker():
+    print(f"--- [NET] Đang mở Server UDP tại cổng {UDP_PORT}... ---")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((UDP_IP, UDP_PORT))
+        sock.settimeout(0.5) 
+        print("--- [NET] Đã sẵn sàng nhận dữ liệu! ---")
+    except Exception as e:
+        print(f"!!! [NET] Lỗi tạo socket: {e}")
+        return
+
+    while shared_data["running"]:
+        try:
+            data, addr = sock.recvfrom(1024)
+            line = data.decode('utf-8').strip()
+            parts = line.split(',')
+            if len(parts) == 5:
+                try:
+                    idx = int(parts[0])
+                   
+                    w = float(parts[1])
+                    x = float(parts[2])
+                    y = float(parts[3])
+                    z = float(parts[4])
+                    
+                   
+                    shared_data["raw"][idx] = [w, x, y, z]
+                except ValueError:
+                    pass
+                    
+        except socket.timeout:
+            continue 
+        except Exception as e:
+            print(f"Lỗi mạng: {e}")
+            
+    sock.close()
+    print("--- [NET] Đã đóng Server. ---")
+
+
+
+class MocapUDPOperator(bpy.types.Operator):
+    bl_idname = "wm.mocap_udp"
+    bl_label = "Mocap WiFi UDP"
+    _timer = None
+
+    def modal(self, context, event):
+        if event.type == 'ESC':
+            return self.cancel(context)
+
+       
+        if (event.type == 'F9' or event.type == 'C') and event.value == 'PRESS':
+            print(">>> CALIBRATING... (Reset ve 0)")
+           
+            for idx in shared_data["raw"]:
+               
+                raw = shared_data["raw"][idx]
+              
+                if idx in SENSOR_CONFIG:
+                    cfg = SENSOR_CONFIG[idx]
+                    o = cfg["order"]
+                    s = cfg["signs"]
+                    q_mapped = Quaternion((
+                        raw[o[0]]*s[0], raw[o[1]]*s[1], raw[o[2]]*s[2], raw[o[3]]*s[3]
+                    ))
+                   
+                    shared_data["offset"][idx] = q_mapped.conjugated()
+
+        if event.type == 'TIMER':
+            obj = bpy.data.objects.get(ARMATURE_NAME)
+            if obj:
+           
+                for idx, config in SENSOR_CONFIG.items():
+                    if idx in shared_data["raw"]:
+                        bone_name = config["bone"]
+                        bone = obj.pose.bones.get(bone_name)
+                        
+                        if bone:
+                           
+                            raw = shared_data["raw"][idx]
+                            
+                        
+                            order = config["order"] 
+                            signs = config["signs"] 
+                            
+                            
+                            q_mapped = Quaternion((
+                                raw[order[0]] * signs[0], # W
+                                raw[order[1]] * signs[1], # X
+                                raw[order[2]] * signs[2], # Y
+                                raw[order[3]] * signs[3]  # Z
+                            ))
+                            
+                         
+                            # Logic: Xoay = Offset * Góc_Hien_Tai
+                            offset = shared_data["offset"].get(idx, Quaternion((1,0,0,0)))
+                            final_q = offset @ q_mapped
+                            
+                     
+                            bone.rotation_quaternion = final_q
+
+            context.area.tag_redraw()
+
+        return {'PASS_THROUGH'}
+
+    def execute(self, context):
+        if shared_data["running"]: return {'FINISHED'}
+        
+        shared_data["running"] = True
+        
+    
+        threading.Thread(target=udp_worker, daemon=True).start()
+        
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.02, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def cancel(self, context):
+        shared_data["running"] = False
+        context.window_manager.event_timer_remove(self._timer)
+        print("=== STOP MOCAP ===")
+        return {'CANCELLED'}
+
+def register():
+    bpy.utils.register_class(MocapUDPOperator)
+
+def unregister():
+    bpy.utils.unregister_class(MocapUDPOperator)
+
+if __name__ == "__main__":
+    register()
+    bpy.ops.wm.mocap_udp()
